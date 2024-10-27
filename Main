@@ -6,7 +6,7 @@
 
 /*--------- Déclaration des grandeurs physiques --- */
 float masse; 
-float incertitude = 0.43; // Calcul voir Annexe Incertitde
+float incertitude = 0.536; // Calcul voir Annexe Incertitde
 
 /*--------- Déclaration des données de calibration --- */
 int i = 1; // compteur
