@@ -1,0 +1,227 @@
+/*--------- Bibliothèques utilisées --- */
+#include "Arduino.h"
+#include "PubSubClient.h"
+#include "WiFi.h"
+#include "esp_wpa2.h"
+
+/*--------- Déclaration des grandeurs physiques --- */
+float masse; 
+float incertitude = 0.43; // Calcul voir Annexe Incertitde
+
+/*--------- Déclaration des données de calibration --- */
+int i = 1; // compteur
+int zero = 0;
+int cinquante = 0;
+int cent = 0;
+int deuxcent = 0;
+
+/*--------- Déclaration des boutons de mesure et de tar --- */
+const int BOUTON_MES = 12; // Bouton de mesure
+const int BOUTON_TAR = 14; // Bouton de TAR
+float tar = 0;
+
+/*--------- Déclaration du capteur HX711 ---------*/
+#include "HX711.h"
+// Cablâge du capteur HX711
+const int LOADCELL_DOUT_PIN = 26;
+const int LOADCELL_SCK_PIN = 27;
+HX711 scale;
+
+/*--------- Paramètres MQTT Broker ---------*/
+const char *mqtt_broker = "147.94.7.32";             // Identifiant du broker (Adresse IPv4) --> commande : ipconfig
+const char *topic = "masse_topic";                   // Nom du topic de la masse
+const char *topicCompteur = "compteur_topic";        // Nom du topic du compteur de mesures
+int compteur = 0;
+const char *topicmasseTaree = "masseTaree_topic";    // Nom du topic de la masse après tarage
+const char *topicTarage = "Tarage_topic";            // Nom du topic du tarage (actif ou non)
+const char *topicIncertitude = "incertitude_topic";  // Nom du topic de l'incertitude
+
+const char *mqtt_username = "";                      // Identifiant dans le cas d'une liaison sécurisée
+const char *mqtt_password = "";                      // Mdp dans le cas d'une liaison sécurisée
+const int mqtt_port = 1883;                          // Port : 1883 dans le cas d'une liaison non sécurisée et 8883 dans le cas d'une liaison cryptée
+
+WiFiClient espClient; 
+PubSubClient client(espClient); 
+
+/*--------- Fonction active à la réception d'un message MQTT ---------*/
+void callback(char *topic, byte *payload, unsigned int length) {
+  for (int i = 0; i < length; i++) {
+    Serial.print((char) payload[i]); 
+  }
+  Serial.println(); 
+  Serial.println("-----------------------");
+}
+
+/*--------- Paramètres EDUROAM ---------*/
+#define EAP_IDENTITY "clement.girard@etu.univ-amu.fr"
+#define EAP_PASSWORD "TMcmm1966." //mot de passe EDUROAM
+#define EAP_USERNAME "clement.girard@etu.univ-amu.fr"
+const char* ssid = "eduroam"; // eduroam SSID
+#define CONNECTION_TIMEOUT 10
+int timeout_counter = 0;
+
+/*--------- Affichage des datas réseau WiFi ---------*/
+void get_network_info(){
+    if(WiFi.status() == WL_CONNECTED) {
+        Serial.print("[*] Informations - SSID : ");
+        Serial.println(ssid);
+        Serial.println((String)"[+] RSSI : " + WiFi.RSSI() + " dB");
+    }
+}
+
+
+void setup() { 
+  Serial.begin(115200); 
+  pinMode(BOUTON_MES, INPUT_PULLUP);                // Initialisation du bouton de mesure
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN); // Acquisistion des données via les ports DOUT et SCK
+
+/*--------- Connexion au réseau WiFi ---------*/
+  delay(10);
+  Serial.print(F("Connexion au réseau : "));
+  Serial.println(ssid);
+  WiFi.disconnect(true);
+  delay(500);
+  WiFi.begin(ssid, WPA2_AUTH_PEAP, EAP_IDENTITY, EAP_USERNAME, EAP_PASSWORD);
+  delay(500);
+ 
+    while(WiFi.status() != WL_CONNECTED){
+        Serial.print(".");
+        delay(200);
+        timeout_counter++;
+        if(timeout_counter >= CONNECTION_TIMEOUT*5){
+        ESP.restart();
+        }
+    }
+
+  Serial.println("");
+  Serial.println(F("Connecté au réseau WiFi."));
+  get_network_info();
+  
+/*--------- Connexion au Broker MQTT ---------*/ 
+  client.setServer(mqtt_broker, mqtt_port); 
+  client.setCallback(callback); 
+
+  while (!client.connected()) { 
+    String client_id = "esp32-client-"; 
+    client_id += String(WiFi.macAddress()); 
+    Serial.printf("La chaîne de mesure %s se connecte au broker MQTT", client_id.c_str()); 
+ 
+    if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) { 
+      Serial.println("La chaîne de mesure est connectée au broker."); 
+    } else { 
+      Serial.print("La chaîne de mesure n'a pas réussi à se connecter ... "); 
+      Serial.print(client.state()); 
+      delay(2000); 
+    } 
+  } 
+} 
+
+
+void loop(){
+/*----- Calibration -------*/
+float reading = scale.read(); // On lit la donnée
+delay(2000);
+
+if (i == 1){ // Boucle 1 : 0g
+  Serial.print("Ne rien poser ");
+  delay(10000);
+  zero = reading;
+  Serial.println(zero);
+  i++;
+
+} else if (i == 2){ // Boucle 1 : 50g
+  Serial.print("Poser 50g ");
+  delay(10000);
+  cinquante = reading;
+  Serial.println(cinquante);
+  i++;
+}
+ else if (i == 3){ // Boucle 1 : 100g
+  Serial.print("Poser 100g ");
+  delay(10000);
+  cent = reading;
+  Serial.println(cent);
+  i++;
+}
+ else if (i == 4){ // Boucle 1 : 200g
+  Serial.print("Poser 200g ");
+  delay(10000);
+  deuxcent = reading;
+  Serial.println(deuxcent);
+  i = 0;
+}
+else{
+
+/*-------- ETAT DES BOUTONS ----------*/
+  int mesure_state = digitalRead(BOUTON_MES);
+  int tar_state = digitalRead(BOUTON_TAR);
+
+
+/*--------- Acquisistion datas et Conversion en grammes ---------*/
+
+  int masse50 = (zero - cinquante) /50;  // On ramène à 1g les 3 mesures de masses
+  int masse100 = (zero - cent) /100;
+  int masse200 = (zero - deuxcent) /200;
+  float masse = (zero - reading)/ ((masse50+masse100+masse200)/3);
+
+/*--------- Tare ---------*/
+  if (tar_state == LOW){    // Si on appuie sur le bouton
+    tar = masse;
+    Serial.println("tarage");
+  }
+
+  float masseTaree = masse - tar;
+
+  incertitude = 2;
+
+/*--------- Affichage Moniteur  ---------*/
+    if (scale.wait_ready_timeout(1000)) {     // Si le temps de lecture de données est inférieur à 1000 (ms) = connexion au capteur réussie
+
+      Serial.print("Vnumérique : ");
+      Serial.print(reading);
+      Serial.print(" - En grammes : ");
+      Serial.print(masse);
+      Serial.print(" ; tar :");
+      Serial.print(tar);
+      Serial.print(" ; masse taree :");
+      Serial.println(masseTaree);
+    } else {                                  // Timeout dépassé
+      Serial.println("HX711 not found.");
+    }
+
+    delay(1000); // Pause de 1 seconde entre chaque envoi
+
+  String readingstr;
+
+/*--------- Envoie des données via MQTT ---------*/
+  // Tarage (T ou F)
+  if (tar != 0){
+    client.publish(topicTarage, String(true).c_str());   // Publication de la masse sur le topic (envoi d'une chaîne de caractères)
+    client.subscribe(topicTarage);                       // S'abonne au topic pour recevoir des messages
+    client.loop();                                       // Gère les messages MQTT (pour lire la valeur de la masse sur le moniteur série de platformIO)
+
+  if(mesure_state == LOW){
+  // masse
+  client.publish(topic, String(masse).c_str());
+  client.subscribe(topic);
+  client.loop();
+
+  // masse taree
+  client.publish(topicmasseTaree, String(masseTaree).c_str());
+  client.subscribe(topicmasseTaree); 
+  client.loop
+
+  // compteur
+  compteur += 1;
+  client.publish(topicCompteur, String(compteur).c_str());
+  client.subscribe(topicCompteur);
+  client.loop(); 
+  delay(1000); 
+
+  // incertitude
+  client.publish(topicIncertitude, String(incertitude).c_str());
+  client.subscribe(topicIncertitude); 
+  client.loop();
+  }
+}
+}
